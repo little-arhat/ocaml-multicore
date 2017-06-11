@@ -30,6 +30,7 @@ void caml_init_interruptor(struct interruptor* s, atomic_uintnat* interrupt_word
 static uintnat handle_incoming(struct interruptor* s)
 {
   uintnat handled = 0;
+  Assert (s->running);
   while (s->received != s->acknowledged) {
     struct interrupt* req = s->messages[s->acknowledged & (Interrupt_queue_len - 1)];
     struct interruptor* sender = req->sender;
@@ -56,6 +57,23 @@ static uintnat handle_incoming(struct interruptor* s)
   return handled;
 }
 
+void caml_start_interruptor(struct interruptor* s)
+{
+  caml_plat_lock(&s->lock);
+  Assert (s->received == s->acknowledged);
+  Assert (!s->running);
+  s->running = 1;
+  caml_plat_unlock(&s->lock);
+}
+
+void caml_stop_interruptor(struct interruptor* s)
+{
+  caml_plat_lock(&s->lock);
+  while (handle_incoming(s) != 0) { }
+  s->running = 0;
+  caml_plat_unlock(&s->lock);
+}
+
 void caml_handle_incoming_interrupts(struct interruptor* s)
 {
   caml_plat_lock(&s->lock);
@@ -73,7 +91,7 @@ void caml_yield_until_interrupted(struct interruptor* s)
 }
 
 static const uintnat INTERRUPT_MAGIC = (uintnat)(-1); //FIXME dup
-void caml_send_interrupt(struct interruptor* self,
+int caml_send_interrupt(struct interruptor* self,
                          struct interruptor* target,
                          interrupt_handler handler,
                          void* data)
@@ -82,12 +100,15 @@ void caml_send_interrupt(struct interruptor* self,
   struct interrupt req;
   int i;
 
+  caml_plat_lock(&target->lock);
+  if (!target->running) {
+    caml_plat_unlock(&target->lock);
+    return 0;
+  }
   req.sender = self;
   req.handler = handler;
   req.data = data;
   atomic_store_rel(&req.completed, 0);
-
-  caml_plat_lock(&target->lock);
   Assert (target->received - target->acknowledged < Interrupt_queue_len);
   pos = target->received++;
   target->messages[pos & (Interrupt_queue_len - 1)] = &req;
@@ -101,7 +122,7 @@ void caml_send_interrupt(struct interruptor* self,
   /* Often, interrupt handlers are fast, so spin for a bit before waiting */
   for (i=0; i<1000; i++) {
     if (atomic_load_acq(&req.completed)) {
-      return;
+      return 1;
     }
     cpu_relax();
   }
@@ -113,4 +134,5 @@ void caml_send_interrupt(struct interruptor* self,
     caml_plat_wait(&self->cond);
   }
   caml_plat_unlock(&self->lock);
+  return 1;
 }

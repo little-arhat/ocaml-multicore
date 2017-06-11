@@ -177,9 +177,10 @@ static void create_domain(uintnat initial_minor_heap_size) {
       atomic_uintnat* young_limit = (atomic_uintnat*)&domain_state->young_limit;
       d->interrupt_word_address = young_limit;
       atomic_store_rel(young_limit, d->minor_heap_area);
+      caml_init_interruptor(&d->interruptor, d->interrupt_word_address);
     }
-    /* FIXME: shutdown RPC? */
-    caml_init_interruptor(&d->interruptor, d->interrupt_word_address);
+    caml_start_interruptor(&d->interruptor);
+
 
     domain_state->id = d->id;
     d->state.state = domain_state;
@@ -267,6 +268,8 @@ void caml_init_domain_self(int domain_id) {
 
 static void domain_terminate() {
   caml_gc_log("Domain terminating");
+  caml_empty_minor_heap();
+  caml_stop_interruptor(&domain_self->interruptor);
   caml_enter_blocking_section();
 
   /* FIXME: proper domain termination and reuse */
@@ -408,6 +411,9 @@ CAMLprim value caml_ml_domain_join(value domain)
 
 CAMLprim value caml_ml_domain_yield(value unused)
 {
+  /* FIXME:
+     Domain.yield probably shouldn't return if the interrupt was an
+     internal one like a promotion request */
   caml_yield_until_interrupted(&domain_self->interruptor);
   return Val_unit;
 }
@@ -857,10 +863,10 @@ CAMLexport void caml_domain_rpc(struct domain* domain,
 }
 #endif
 
-CAMLexport void caml_domain_rpc(struct domain* domain,
+CAMLexport int caml_domain_rpc(struct domain* domain,
                                 domain_rpc_handler handler, void* data)
 {
-  caml_send_interrupt(&domain_self->interruptor, &domain->internals->interruptor,
+  return caml_send_interrupt(&domain_self->interruptor, &domain->internals->interruptor,
                       handler, data);
 }
 

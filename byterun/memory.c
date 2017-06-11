@@ -258,7 +258,9 @@ static void send_read_fault(struct read_fault_req* req)
   value v = Op_val(req->obj)[req->field];
   if (Is_minor(v)) {
     // caml_gc_log("Read fault to domain [%02d]", caml_owner_of_young_block(v)->id);
-    caml_domain_rpc(caml_owner_of_young_block(v), &handle_read_fault, req);
+    if (!caml_domain_rpc(caml_owner_of_young_block(v), &handle_read_fault, req)) {
+      send_read_fault(req);
+    }
     Assert(!Is_minor(req->ret));
     // caml_gc_log("Read fault returned (%p)", (void*)req->ret);
   } else {
@@ -308,7 +310,9 @@ static void handle_bvar_transfer(struct domain* self, void *reqp)
        and there's nobody left to win the race */
     // caml_gc_log("Stale bvar transfer [%02d] -> [%02d] ([%02d] got there first)",
     //            self->id, req->new_owner, owner);
-    caml_domain_rpc(caml_domain_of_id(owner), &handle_bvar_transfer, req);
+    if (!caml_domain_rpc(caml_domain_of_id(owner), &handle_bvar_transfer, req)) {
+      /* if it failed, the calling domain will retry if necessary */
+    }
   }
 }
 
@@ -324,7 +328,9 @@ intnat caml_bvar_status(value bv)
     /* Otherwise, need to transfer */
     struct bvar_transfer_req req = {bv, Caml_state->id};
     // caml_gc_log("Transferring bvar from domain [%02d]", owner);
-    caml_domain_rpc(caml_domain_of_id(owner), &handle_bvar_transfer, &req);
+    if (!caml_domain_rpc(caml_domain_of_id(owner), &handle_bvar_transfer, &req)) {
+      /* don't care if it failed, since we check ownership next time around */
+    }
 
     /* We may not have ownership at this point: we might have just
        handled an incoming ownership request right after we got

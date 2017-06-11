@@ -70,7 +70,8 @@ struct domain* caml_owner_of_young_block(value);
 
 struct domain* caml_domain_of_id(int);
 
-void caml_domain_rpc(struct domain*,
+CAMLcheckresult
+int caml_domain_rpc(struct domain*,
                      domain_rpc_handler, void*);
 
 #endif /* CAML_DOMAIN_H */
