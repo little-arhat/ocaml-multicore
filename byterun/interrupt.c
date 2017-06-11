@@ -1,7 +1,7 @@
 #include "caml/platform.h"
 #include "caml/interrupt.h"
 #include "caml/domain.h"
-#include <stdio.h>
+#include <stddef.h>
 
 /* Sending interrupts between domains.
 
@@ -11,19 +11,41 @@
    - Don't hold two interruptor locks at the same time
    - Continue to handle incoming interrupts even when waiting for a response */
 
-struct interrupt {
-  struct interruptor* sender;
-  interrupt_handler handler;
-  void* data;
-  atomic_uintnat completed;
-};
+static void waitq_init(struct waitq* q)
+{
+  q->head = NULL;
+}
+
+static int waitq_empty(struct waitq* q)
+{
+  return q->head == NULL;
+}
+
+static struct interruptor* waitq_remove(struct waitq* q)
+{
+  Assert (!waitq_empty(q));
+  struct interruptor* s = q->head;
+  q->head = s->next;
+  return s;
+}
+
+static void waitq_add(struct waitq* q, struct interruptor* s)
+{
+  if (waitq_empty(q)) {
+    q->head = q->tail = s;
+  } else {
+    q->tail->next = s;
+  }
+  s->next = NULL;
+  q->tail = s;
+}
 
 void caml_init_interruptor(struct interruptor* s, atomic_uintnat* interrupt_word)
 {
   s->interrupt_word = interrupt_word;
   caml_plat_mutex_init(&s->lock);
   caml_plat_cond_init(&s->cond, &s->lock);
-  s->received = s->acknowledged = 0;
+  waitq_init(&s->interrupts);
 }
 
 /* must be called with s->lock held */
@@ -31,10 +53,9 @@ static uintnat handle_incoming(struct interruptor* s)
 {
   uintnat handled = 0;
   Assert (s->running);
-  while (s->received != s->acknowledged) {
-    struct interrupt* req = s->messages[s->acknowledged & (Interrupt_queue_len - 1)];
-    struct interruptor* sender = req->sender;
-    s->acknowledged++;
+  while (!waitq_empty(&s->interrupts)) {
+    struct interruptor* sender = waitq_remove(&s->interrupts);
+    struct interrupt* req = &sender->current_interrupt;
 
     /* Unlock s while the handler runs, to allow other
        domains to send us messages. This is necessary to
@@ -44,7 +65,6 @@ static uintnat handle_incoming(struct interruptor* s)
 
     req->handler(caml_domain_self(), req->data);
     atomic_store_rel(&req->completed, 1);
-    /* req is now invalid, and may have been deallocated */
 
     /* lock sender->lock so that we don't broadcast between check and wait */
     caml_plat_lock(&sender->lock);
@@ -60,7 +80,7 @@ static uintnat handle_incoming(struct interruptor* s)
 void caml_start_interruptor(struct interruptor* s)
 {
   caml_plat_lock(&s->lock);
-  Assert (s->received == s->acknowledged);
+  Assert (waitq_empty(&s->interrupts));
   Assert (!s->running);
   s->running = 1;
   caml_plat_unlock(&s->lock);
@@ -96,8 +116,7 @@ int caml_send_interrupt(struct interruptor* self,
                          interrupt_handler handler,
                          void* data)
 {
-  uintnat pos;
-  struct interrupt req;
+  struct interrupt* req = &self->current_interrupt;
   int i;
 
   caml_plat_lock(&target->lock);
@@ -105,13 +124,10 @@ int caml_send_interrupt(struct interruptor* self,
     caml_plat_unlock(&target->lock);
     return 0;
   }
-  req.sender = self;
-  req.handler = handler;
-  req.data = data;
-  atomic_store_rel(&req.completed, 0);
-  Assert (target->received - target->acknowledged < Interrupt_queue_len);
-  pos = target->received++;
-  target->messages[pos & (Interrupt_queue_len - 1)] = &req;
+  req->handler = handler;
+  req->data = data;
+  atomic_store_rel(&req->completed, 0);
+  waitq_add(&target->interrupts, self);
   /* Signal the condition variable, in case the target is
      itself waiting for an interrupt to be processed elsewhere */
   caml_plat_broadcast(&target->cond); // OPT before/after unlock? elide?
@@ -121,7 +137,7 @@ int caml_send_interrupt(struct interruptor* self,
 
   /* Often, interrupt handlers are fast, so spin for a bit before waiting */
   for (i=0; i<1000; i++) {
-    if (atomic_load_acq(&req.completed)) {
+    if (atomic_load_acq(&req->completed)) {
       return 1;
     }
     cpu_relax();
@@ -130,7 +146,7 @@ int caml_send_interrupt(struct interruptor* self,
   caml_plat_lock(&self->lock);
   while (1) {
     handle_incoming(self);
-    if (atomic_load_acq(&req.completed)) break;
+    if (atomic_load_acq(&req->completed)) break;
     caml_plat_wait(&self->cond);
   }
   caml_plat_unlock(&self->lock);

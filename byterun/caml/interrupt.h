@@ -4,23 +4,32 @@
 #include "mlvalues.h"
 #include "platform.h"
 
-#define Interrupt_queue_len 256
+struct waitq {
+  struct interruptor* head;
+  struct interruptor* tail; /* well-defined only if head != NULL */
+};
 
-CAML_STATIC_ASSERT(Interrupt_queue_len >= Max_domains);
-CAML_STATIC_ASSERT(Is_power_of_2(Interrupt_queue_len));
+struct domain; // compat hack
+typedef void (*interrupt_handler)(struct domain*, void*);
+struct interrupt {
+  interrupt_handler handler;
+  void* data;
+  atomic_uintnat completed;
+};
 
-struct interrupt;
 struct interruptor {
   atomic_uintnat* interrupt_word;
   caml_plat_mutex lock;
   caml_plat_cond cond;
 
   int running;
-  struct interruptor* joiner;
+  /* Queue of domains trying to send interrupts here */
+  struct waitq interrupts;
+  struct interrupt current_interrupt;
 
-  /* Ring buffer of pending interrupts */
-  uintnat received, acknowledged;
-  struct interrupt* messages[Interrupt_queue_len];
+  /* Next pointer for wait queues.
+     Touched only when the queue is locked */
+  struct interruptor* next;
 };
 
 void caml_init_interruptor(struct interruptor* s, atomic_uintnat* interrupt_word);
@@ -30,10 +39,7 @@ void caml_yield_until_interrupted(struct interruptor* self);
 
 void caml_start_interruptor(struct interruptor* self);
 void caml_stop_interruptor(struct interruptor* self);
-void caml_join_interruptor(struct interruptor* self, struct interuptor* target);
-
-struct domain; // compat hack
-typedef void (*interrupt_handler)(struct domain*, void*);
+void caml_join_interruptor(struct interruptor* self, struct interruptor* target);
 
 /* returns 0 on failure, if the target has terminated. */
 CAMLcheckresult
@@ -41,6 +47,6 @@ int caml_send_interrupt(struct interruptor* self,
                         struct interruptor* target,
                         interrupt_handler handler,
                         void* data);
-                         
+
 
 #endif /* CAML_INTERRUPT_H */
