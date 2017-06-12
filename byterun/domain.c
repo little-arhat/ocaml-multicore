@@ -281,6 +281,14 @@ struct domain_startup_params {
   caml_plat_event ev;
   caml_root callback;
   dom_internal* newdom;
+  struct domain_thread* dt;
+};
+
+struct domain_thread {
+    caml_plat_mutex m;
+    pthread_t th; /* immutable once initialised */
+    int joinable; /* access protected by mutex m */
+  struct interruptor* interruptor;
 };
 
 static void* domain_thread_func(void* v) {
@@ -289,6 +297,7 @@ static void* domain_thread_func(void* v) {
 
   create_domain(caml_params->minor_heap_init);
   p->newdom = domain_self;
+  p->dt->interruptor = &domain_self->interruptor;
   caml_plat_event_trigger(&p->ev);
   /* cannot access p below here */
 
@@ -302,12 +311,6 @@ static void* domain_thread_func(void* v) {
   }
   return 0;
 }
-
-struct domain_thread {
-    caml_plat_mutex m;
-    pthread_t th; /* immutable once initialised */
-    int joinable; /* access protected by mutex m */
-};
 
 #define Domainthreadptr_val(val) ((struct domain_thread**)Data_custom_val(val))
 
@@ -353,6 +356,7 @@ CAMLprim value caml_domain_spawn(value callback)
   d->joinable = 0;
   caml_plat_mutex_init(&d->m);
 
+  p.dt = d;
   caml_plat_event_init(&p.ev);
 
   p.callback = caml_create_root(caml_promote(&domain_self->state, callback));
@@ -400,6 +404,10 @@ CAMLprim value caml_ml_domain_join(value domain)
     caml_plat_unlock(&d->m);
     if (err)
         caml_invalid_argument("Domain was already joined");
+    caml_join_interruptor(&domain_self->interruptor,
+                          d->interruptor,
+                          0);
+    caml_gc_log("interruptor joined");
     caml_enter_blocking_section();
     err = pthread_join(th, NULL);
     caml_leave_blocking_section();

@@ -275,6 +275,7 @@ CAMLexport value caml_read_barrier(value obj, int field)
   if (Is_foreign(v)) {
     struct read_fault_req req = {obj, field, Val_unit};
     send_read_fault(&req);
+    Assert (!Is_foreign(req.ret));
     return req.ret;
   } else {
     return v;

@@ -40,12 +40,24 @@ static void waitq_add(struct waitq* q, struct interruptor* s)
   q->tail = s;
 }
 
+static void waitq_cancel(struct waitq* q, struct interruptor* s)
+{
+  struct interruptor** curr = &q->head;
+  while (*curr != s) {
+    curr = &((*curr)->next);
+    Assert(*curr);
+  }
+  *curr = (*curr)->next;
+}
+
 void caml_init_interruptor(struct interruptor* s, atomic_uintnat* interrupt_word)
 {
   s->interrupt_word = interrupt_word;
   caml_plat_mutex_init(&s->lock);
   caml_plat_cond_init(&s->cond, &s->lock);
   waitq_init(&s->interrupts);
+  s->running = 0;
+  s->generation = 0;
 }
 
 /* must be called with s->lock held */
@@ -88,10 +100,73 @@ void caml_start_interruptor(struct interruptor* s)
 
 void caml_stop_interruptor(struct interruptor* s)
 {
+  int64 next_generation;
   caml_plat_lock(&s->lock);
   while (handle_incoming(s) != 0) { }
   s->running = 0;
+  s->generation++;
+  next_generation = s->generation;
+  while (!waitq_empty(&s->joiners)) {
+    struct interruptor* j = waitq_remove(&s->joiners);
+    caml_plat_unlock(&s->lock);
+    caml_plat_lock(&j->lock);
+    j->join_target_generation = next_generation;
+    caml_plat_broadcast(&j->cond);
+    caml_plat_unlock(&j->lock);
+    caml_plat_lock(&s->lock);
+  }
   caml_plat_unlock(&s->lock);
+}
+
+int caml_join_interruptor(struct interruptor* self,
+                          struct interruptor* target,
+                          int64 target_gen)
+{
+  int done = 0, interrupted = 0;
+  /* First, add ourselves to the target's wait queue */
+  caml_plat_lock(&target->lock);
+  if (target->generation > target_gen) {
+    /* target already finished, just return */
+    caml_plat_unlock(&target->lock);
+    return 1;
+  }
+  self->join_target_generation = 0;
+  waitq_add(&target->joiners, self);
+  caml_plat_unlock(&target->lock);
+
+  /* Wait until either an interrupt or the target stops */
+  caml_plat_lock(&self->lock);
+  while (1) {
+    /* FIXME: "internal" interrupts like promotion requests
+       might not be sufficient reason to quit the loop */
+    if (handle_incoming(self))
+      interrupted = 1;
+    if (self->join_target_generation > target_gen)
+      done = 1;
+    if (done || interrupted)
+      break;
+    caml_plat_wait(&self->cond);
+  }
+  caml_plat_unlock(&self->lock);
+
+  /* If the target didn't end, we need to remove ourselves
+     from its wait queue. NB: it may end just as we do
+     this, so we need to recheck termination */
+  if (!done) {
+    caml_plat_lock(&target->lock);
+    if (target->generation > target_gen) {
+      done = 1;
+    } else {
+      waitq_cancel(&target->joiners, self);
+    }
+    caml_plat_unlock(&target->lock);
+  }
+
+  if (!done) {
+    caml_gc_log("join interrupted");
+  }
+
+  return done;
 }
 
 void caml_handle_incoming_interrupts(struct interruptor* s)

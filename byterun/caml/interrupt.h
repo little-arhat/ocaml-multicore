@@ -23,6 +23,10 @@ struct interruptor {
   caml_plat_cond cond;
 
   int running;
+  int64 generation;
+  struct waitq joiners;
+  int64 join_target_generation;
+
   /* Queue of domains trying to send interrupts here */
   struct waitq interrupts;
   struct interrupt current_interrupt;
@@ -39,7 +43,7 @@ void caml_yield_until_interrupted(struct interruptor* self);
 
 void caml_start_interruptor(struct interruptor* self);
 void caml_stop_interruptor(struct interruptor* self);
-void caml_join_interruptor(struct interruptor* self, struct interruptor* target);
+int caml_join_interruptor(struct interruptor* self, struct interruptor* target, int64 target_gen);
 
 /* returns 0 on failure, if the target has terminated. */
 CAMLcheckresult
