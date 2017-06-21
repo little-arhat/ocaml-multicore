@@ -227,3 +227,10 @@ int caml_send_interrupt(struct interruptor* self,
   caml_plat_unlock(&self->lock);
   return 1;
 }
+
+int caml_wait_interruptor(struct interruptor* self)
+{
+  caml_plat_lock(&self->lock);
+}
+
+void caml_signal_interruptor(struct interruptor* target);

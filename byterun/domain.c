@@ -885,3 +885,70 @@ CAMLexport int caml_domain_rpc(struct domain* domain,
   #include "caml/domain_state.tbl"
   #undef DOMAIN_STATE
 #endif
+
+
+
+/* Waiters.
+
+   States:
+    INIT
+    WAITING(interruptor)
+    WOKEN
+*/
+
+/*
+  W_interrupted implies W_waiting.
+  If W_waiting set, interruptor ID in high bits.
+ */
+enum {
+  W_woken = Val_long(0x1),
+  W_waiting = Val_long(0x2),
+  W_interrupted = Val_long(0x4)
+};
+
+CAMLprim value caml_sync_wait(value vwaiter)
+{
+  CAMLparam1(vwaiter);
+  atomic_uintnat* waiter = (atomic_uintnat*)Op_val(vwaiter);
+  uintnat v;
+
+  SPIN_WAIT {
+    uintnat oldv = atomic_load_acq(waiter);
+    if (oldv & W_waiting)
+      caml_invalid_argument("wait called twice on this waiter");
+    Assert((oldv >> 8) == 0);
+    v = oldv | W_waiting | (domain_self->id << 8);
+    if (atomic_cas(waiter, oldv, v)) break;
+  }
+  Assert(!(v & W_interrupted));
+
+  if (!(v & W_woken)) {
+    struct interruptor* i = &domain_self->interruptor;
+    caml_plat_lock(&i->lock);
+    
+    caml_plat_unlock(&i->lock);
+  }
+}
+
+CAMLprim value caml_sync_wake(value vwaiter)
+{
+  CAMLparam1(vwaiter);
+  atomic_uintnat* waiter = (atomic_uintnat*)Op_val(vwaiter);
+  uintnat v;
+
+  SPIN_WAIT {
+    uintnat oldv = atomic_load_acq(waiter);
+    if (oldv & W_woken)
+      caml_invalid_argument("wake called twice on this waiter");
+    v = oldv | W_woken;
+    if (atomic_cas(waiter, oldv, v)) break;
+  }
+
+  if ((v & W_waiting) &&
+      !(v & W_interrupted)) {
+    struct interruptor* i = &all_domains[v >> 8].interruptor;
+    caml_plat_lock(&i->lock);
+    caml_plat_broadcast(&i->cond);
+    caml_plat_unlock(&i->lock);
+  }
+}
